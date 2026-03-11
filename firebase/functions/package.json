@@ -1,0 +1,12 @@
+{
+  "name": "rewird-firebase-functions",
+  "private": true,
+  "engines": {
+    "node": "20"
+  },
+  "main": "src/index.js",
+  "dependencies": {
+    "firebase-admin": "^12.1.1",
+    "firebase-functions": "^5.0.1"
+  }
+}

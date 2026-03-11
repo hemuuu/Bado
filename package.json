@@ -1,0 +1,16 @@
+{
+  "scripts": {
+    "start": "node server.js",
+    "cap:copy": "node tools/prepare-www.mjs",
+    "cap:sync": "npm run cap:copy && npx cap sync android",
+    "android:open": "npx cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.2.0",
+    "@capacitor/cli": "^8.2.0",
+    "@capacitor/core": "^8.2.0",
+    "body-parser": "^2.2.2",
+    "express": "^5.2.1",
+    "web-push": "^3.6.7"
+  }
+}

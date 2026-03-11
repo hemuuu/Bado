@@ -1,0 +1,10 @@
+export const CUBE_SCALE_DURATION = 900; // 15 minutes (seconds until cubes reach zero)
+export const AUTO_RUN_TIMES = ['11:00', '14:30', '17:30', '22:30'];
+export const CIRCLE_Y_START = 1.146;
+export const CIRCLE_Y_END = 0.396;
+export const SIP_INTERVAL = 7;
+export const MAX_FACE_ROLL_WATER = 10;
+export const WATER_DEPTH_SCALE = 0.35;
+export const WATER_MODE_TRANSITION_DURATION = 0.5;
+export const OWNER_POS_THRESHOLD = 3;
+export const OWNER_NEG_THRESHOLD = 6;
