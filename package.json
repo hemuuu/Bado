@@ -3,7 +3,9 @@
     "start": "node server.js",
     "cap:copy": "node tools/prepare-www.mjs",
     "cap:sync": "npm run cap:copy && npx cap sync android",
-    "android:open": "npx cap open android"
+    "android:open": "npx cap open android",
+    "vercel:deploy": "npx vercel --prod",
+    "vercel:deploy:yes": "npx vercel --prod --yes"
   },
   "dependencies": {
     "@capacitor/android": "^8.2.0",

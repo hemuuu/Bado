@@ -1,0 +1,15 @@
+.git
+.vscode
+node_modules
+android
+firebase
+data
+www
+server.js
+package-lock.json
+package.json
+face-api.js-master
+enrollment_data
+photo_studio_loft_hall_4k.exr
+avatar.blend
+firebase-debug.log
