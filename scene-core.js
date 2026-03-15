@@ -400,10 +400,8 @@ async function startAuthorizedTracking() {
   authorizedTrackingStartPromise = (async () => {
     try {
       await initWebcam(video);
-      if (webcamContainer) webcamContainer.style.display = '';
       await initMediaPipe();
       initWaterModeScheduler();
-      ensureWaterTestControls();
       authorizedTrackingStarted = true;
       trackingRetryCount = 0;
       if (trackingRetryTimer) {
@@ -586,140 +584,11 @@ function toggleOverlay() {
 }
 
 function maybeRequestNotificationPermission() {
-  if (typeof Notification === 'undefined') return;
-  if (Notification.permission === 'granted') {
-    if (!pushSubscriptionReady) {
-      ensurePushSubscription()
-        .then((ok) => { pushSubscriptionReady = Boolean(ok); })
-        .catch((err) => console.warn('Push subscription failed:', err));
-    }
-    return;
-  }
-  if (notificationPermissionRequested) return;
-  if (Notification.permission !== 'default') return;
-  notificationPermissionRequested = true;
-  Notification.requestPermission()
-    .then((permission) => {
-      if (permission === 'granted') {
-        return ensurePushSubscription()
-          .then((ok) => { pushSubscriptionReady = Boolean(ok); })
-          .catch((err) => console.warn('Push subscription failed:', err));
-      }
-      return null;
-    })
-    .catch((err) => {
-      console.warn('Notification permission request failed:', err);
-    });
+  return;
 }
 
 async function showWaterNotification() {
-  console.groupCollapsed('[NotifyDiag] precheck');
-  console.log('origin:', window.location.origin);
-  console.log('protocol:', window.location.protocol);
-  console.log('visibilityState:', document.visibilityState);
-  console.log('hasFocus:', document.hasFocus());
-  console.log('navigator.onLine:', navigator.onLine);
-  console.log('Notification API available:', typeof Notification !== 'undefined');
-  if (typeof Notification !== 'undefined') {
-    console.log('Notification.permission:', Notification.permission);
-    console.log('Notification.maxActions:', Notification.maxActions ?? null);
-  }
-  console.groupEnd();
-
-  if (typeof Notification === 'undefined') {
-    console.warn('[NotifyDiag] Notification API unsupported in this browser.');
-    return;
-  }
-  if (Notification.permission !== 'granted') {
-    console.warn('[NotifyDiag] Notification permission is not granted.', {
-      permission: Notification.permission
-    });
-    if (Notification.permission === 'default') maybeRequestNotificationPermission();
-    return;
-  }
-
-  const tpl = window.__APP_NOTIFICATION_TEMPLATE__ || {};
-  const title = tpl.title || 'Bado';
-  const message = tpl.message || 'Dry lag raha hai tu';
-  const imageUrl = tpl.imageUrl || undefined;
-  const clickUrl = tpl.clickUrl || window.location.origin;
-  const options = {
-    body: message,
-    icon: imageUrl,
-    image: imageUrl,
-    data: { url: clickUrl },
-    tag: 'bado-water-reminder',
-    renotify: true,
-    requireInteraction: true
-  };
-
-  console.info('[NotifyDiag] Triggering notification', {
-    title,
-    message,
-    imageUrl: imageUrl || null,
-    clickUrl
-  });
-
-  try {
-    let deliveredByServiceWorker = false;
-    if ('serviceWorker' in navigator) {
-      const reg = await navigator.serviceWorker.getRegistration();
-      if (reg?.showNotification) {
-        console.info('[NotifyDiag] SW registration found', {
-          scope: reg.scope,
-          activeScriptURL: reg.active?.scriptURL || null
-        });
-        await reg.showNotification(title, options);
-        console.info('[NotifyDiag] serviceWorker.showNotification sent');
-        deliveredByServiceWorker = true;
-        if (reg.getNotifications) {
-          const shown = await reg.getNotifications({ tag: 'bado-water-reminder' });
-          console.info('[NotifyDiag] getNotifications(tag=bado-water-reminder)', {
-            count: shown.length
-          });
-        }
-      } else {
-        console.warn('[NotifyDiag] No service worker registration with showNotification available.');
-      }
-    } else {
-      console.warn('[NotifyDiag] serviceWorker not available on navigator.');
-    }
-
-    if (!deliveredByServiceWorker) {
-      const notification = new Notification(title, options);
-      console.info('[NotifyDiag] Notification() constructor fallback sent');
-      notification.onclick = () => {
-        try {
-          window.focus();
-          window.location.href = clickUrl;
-        } catch (err) {
-          console.warn('Notification click navigation failed:', err);
-        }
-      };
-      notification.onerror = (event) => {
-        console.warn('[NotifyDiag] Notification instance onerror fired', event);
-      };
-      notification.onshow = () => {
-        console.info('[NotifyDiag] Notification instance onshow fired');
-      };
-    }
-  } catch (err) {
-    console.warn('[NotifyDiag] Notification send flow failed:', err);
-    try {
-      const notification = new Notification(title, options);
-      console.info('[NotifyDiag] Notification() constructor recovery sent');
-      notification.onclick = () => {
-        try {
-          window.focus();
-          window.location.href = clickUrl;
-        } catch (clickErr) {
-          console.warn('Notification click navigation failed:', clickErr);
-        }
-      };
-    } catch (fallbackErr) {
-      console.warn('[NotifyDiag] Notification constructor fallback failed:', fallbackErr);
-    }
-  }
+  return;
 }
 
 function handleWaterModeStopEffects(source) {
@@ -748,56 +617,7 @@ function handleWaterModeStopEffects(source) {
 }
 
 function ensureWaterTestControls() {
-  if (waterTestControls) return waterTestControls;
-  const wrap = document.createElement('div');
-  wrap.id = 'waterTestControls';
-  wrap.style.cssText = [
-    'position: fixed',
-    'left: 20px',
-    'top: 20px',
-    'display: flex',
-    'gap: 8px',
-    'z-index: 2300'
-  ].join(';');
-
-  const onBtn = document.createElement('button');
-  onBtn.type = 'button';
-  onBtn.textContent = 'Water ON';
-  onBtn.style.cssText = [
-    'border: 0',
-    'border-radius: 8px',
-    'padding: 8px 12px',
-    'font-weight: 700',
-    'font-size: 12px',
-    'cursor: pointer',
-    'background: #1976d2',
-    'color: #fff'
-  ].join(';');
-  onBtn.addEventListener('click', () => {
-    maybeRequestNotificationPermission();
-    startWaterMode('manual-test');
-  });
-
-  const offBtn = document.createElement('button');
-  offBtn.type = 'button';
-  offBtn.textContent = 'Water OFF';
-  offBtn.style.cssText = [
-    'border: 0',
-    'border-radius: 8px',
-    'padding: 8px 12px',
-    'font-weight: 700',
-    'font-size: 12px',
-    'cursor: pointer',
-    'background: #455a64',
-    'color: #fff'
-  ].join(';');
-  offBtn.addEventListener('click', () => stopWaterMode('timeout'));
-
-  wrap.appendChild(onBtn);
-  wrap.appendChild(offBtn);
-  document.body.appendChild(wrap);
-  waterTestControls = wrap;
-  return waterTestControls;
+  return null;
 }
 
 function playWaterSoundPattern() {
@@ -928,9 +748,7 @@ function initWaterModeScheduler() {
 }
 
 function initNotificationPermissionHooks() {
-  const handleFirstInteraction = () => maybeRequestNotificationPermission();
-  document.addEventListener('pointerdown', handleFirstInteraction, { once: true });
-  document.addEventListener('keydown', handleFirstInteraction, { once: true });
+  return;
 }
 
 /* DETECTION LOOP */

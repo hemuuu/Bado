@@ -21,13 +21,7 @@ html, body {
   background: #305CDE;
 }
 #webcamContainer {
-  position: absolute;
-  bottom: 20px;
-  left: 20px;
-  width: 220px;
-  height: 165px;
-  border-radius: 12px;
-  overflow: hidden;
+  display: none;
 }
 #webcam {
   position: absolute;
@@ -36,30 +30,11 @@ html, body {
 }
 
 #overlayCanvas {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 220px;
-  height: 165px;
-  pointer-events: none;
-  z-index: 10;
+  display: none;
 }
 
 #gestureIndicator {
-  position: absolute;
-  top: 20px;
-  right: 20px;
-  background: rgba(255,255,255,0.95);
-  padding: 10px 18px;
-  border-radius: 8px;
-  font-family: system-ui, -apple-system, sans-serif;
-  font-size: 13px;
-  color: #305CDE;
-  font-weight: 600;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-  z-index: 2000;
-  opacity: 0;
-  transition: opacity 0.3s;
+  display: none;
 }
 
 #gestureIndicator.active {
@@ -78,7 +53,7 @@ html, body {
   <canvas id="overlayCanvas"></canvas>
 </div>
 
-<div id="gestureIndicator">Palm Detected!</div>
+<div id="gestureIndicator"></div>
 <script>
   window.__FIREBASE_CONFIG__ = {
     apiKey: 'AIzaSyDFbPwFQ-gHoYgwIqInOXrPvw_4Q4EtXug',
