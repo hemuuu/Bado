@@ -1,5 +1,5 @@
 // Tracking mode module: expose tracking-related initialization from the core scene.
-// Tracking now starts only after face authorization succeeds.
+// Tracking starts directly on launch, but this helper remains for manual restarts.
 
 import { startAuthorizedTracking } from './scene-core.js';
 
@@ -7,3 +7,6 @@ import { startAuthorizedTracking } from './scene-core.js';
 export function startTrackingMode() {
   return startAuthorizedTracking();
 }
+
+// Automatically start tracking mode on module load
+startTrackingMode();
