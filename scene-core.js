@@ -62,6 +62,30 @@ const loader = new GLTFLoader();
 loadModel(DEFAULT_MODEL_PATH);
 loadPersistentWaterState();
 
+const trackingDebugPanel = document.createElement('div');
+trackingDebugPanel.style.cssText = [
+  'position:fixed',
+  'left:12px',
+  'bottom:12px',
+  'z-index:6000',
+  'min-width:220px',
+  'max-width:70vw',
+  'padding:10px 12px',
+  'border-radius:10px',
+  'background:rgba(8,12,24,0.78)',
+  'border:1px solid rgba(255,255,255,0.12)',
+  'color:#eaf2ff',
+  'font:12px/1.45 monospace',
+  'white-space:pre-wrap',
+  'pointer-events:none'
+].join(';');
+trackingDebugPanel.textContent = 'TrackingDiag\nbooting...';
+document.body.appendChild(trackingDebugPanel);
+
+function setTrackingDebug(lines) {
+  trackingDebugPanel.textContent = ['TrackingDiag', ...lines].join('\n');
+}
+
 function disposeCurrentModel() {
   if (!model) return;
   if (mixer) {
@@ -268,15 +292,32 @@ const video = document.getElementById('webcam');
 const overlayCanvas = document.getElementById('overlayCanvas');
 const overlayCtx = overlayCanvas.getContext('2d');
 const webcamContainer = document.getElementById('webcamContainer');
-overlayCanvas.width = 220;
-overlayCanvas.height = 165;
-if (webcamContainer) webcamContainer.style.display = 'none';
+const HAND_CONNECTIONS = [
+  [0, 1], [1, 2], [2, 3], [3, 4],
+  [0, 5], [5, 6], [6, 7], [7, 8],
+  [5, 9], [9, 10], [10, 11], [11, 12],
+  [9, 13], [13, 14], [14, 15], [15, 16],
+  [13, 17], [17, 18], [18, 19], [19, 20],
+  [0, 17]
+];
+syncOverlayCanvasSize();
 let authorizedTrackingStarted = false;
 let authorizedTrackingStartPromise = null;
 let mediaPipeInitialized = false;
+let mediaPipeInitializingPromise = null;
+let detectionLoopStarted = false;
 let trackingRetryTimer = null;
 let trackingRetryCount = 0;
 const TRACKING_RETRY_DELAY_MS = 3000;
+
+function syncOverlayCanvasSize() {
+  const viewportWidth = overlayCanvas.clientWidth || webcamContainer.clientWidth || 220;
+  const viewportHeight = overlayCanvas.clientHeight || webcamContainer.clientHeight || 165;
+  overlayCanvas.width = viewportWidth;
+  overlayCanvas.height = viewportHeight;
+}
+
+window.addEventListener('resize', syncOverlayCanvasSize);
 
 /* UI / MODES */
 const gestureIndicator = document.getElementById('gestureIndicator');
@@ -297,6 +338,7 @@ let faceRoll = 0, facePitch = 0, faceDepth = 0;
 let faceRollCurrent = 0, facePitchCurrent = 0, faceDepthCurrent = 0;
 let neutralHeight = null;
 let mouthOpen = 0, mouthCurrent = 0;
+let neutralMouthRatio = null;
 let rawEyeDist = null;
 let baselineEyeDist = null;
 let smoothedEyeDist = null;
@@ -337,59 +379,101 @@ const MIN_POSITION_Y = -0.45;
 const MAX_POSITION_Y = 0.95;
 const IS_MOBILE_DEVICE = /Mobi|Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
   || (navigator.maxTouchPoints > 1 && window.matchMedia('(pointer: coarse)').matches);
+const MEDIAPIPE_DELEGATE = IS_MOBILE_DEVICE ? 'CPU' : 'GPU';
+const MOBILE_DOUBLE_TAP_MS = 320;
+const MOBILE_ROTATION_DRAG_FACTOR = 0.012;
+const MOBILE_POSITION_DRAG_FACTOR = 0.01;
+const MOBILE_PINCH_SCALE_FACTOR = 0.006;
+
+let mobileTouchMode = null;
+let mobileLastTapTime = 0;
+let mobileTouchStartX = 0;
+let mobileTouchStartY = 0;
+let mobileTouchBaselineRotationY = 0;
+let mobileTouchBaselinePositionY = 0;
+let mobileTouchBaselineScale = 0;
+let mobileTouchInitialDistance = -1;
 
 let indexFingerYHistory = [];
 let indexFingerXHistory = [];
 const FINGER_HISTORY_SIZE = 7;
 
-let lastVideoTime = -1;
 let lastProcessTime = 0;
-const PROCESS_INTERVAL = 33;
-const SMOOTH_TIME_EDIT = 0.18;
+let lastGestureProcessTime = 0;
+let lastFaceDiagLogTime = 0;
+const PROCESS_INTERVAL = IS_MOBILE_DEVICE ? 36 : 24;
+const GESTURE_PROCESS_INTERVAL_IDLE = IS_MOBILE_DEVICE ? 180 : 120;
+const GESTURE_PROCESS_INTERVAL_ACTIVE = IS_MOBILE_DEVICE ? 72 : 48;
+const SMOOTH_TIME_EDIT = 0.14;
 const SMOOTH_TIME_NORMAL = 0.12;
-const SMOOTH_TIME_FACE_TRACK = 0.18;
-const SMOOTH_TIME_FACE_ROLL = 0.26;
-const SMOOTH_TIME_EYE = 0.18;
-const SMOOTH_TIME_MOUTH = 0.16;
-const EYE_INPUT_SMOOTHING = 0.35;
-const PITCH_INPUT_SMOOTHING = 0.35;
-const ROLL_INPUT_SMOOTHING = 0.4;
-const ROLL_DEADZONE_DEG = 0.5;
+const SMOOTH_TIME_FACE_TRACK = 0.26;
+const SMOOTH_TIME_FACE_ROLL = 0.34;
+const SMOOTH_TIME_EYE = 0.24;
+const SMOOTH_TIME_MOUTH = 0.12;
+const EYE_INPUT_SMOOTHING = 0.22;
+const PITCH_INPUT_SMOOTHING = 0.2;
+const ROLL_INPUT_SMOOTHING = 0.22;
+const ROLL_DEADZONE_DEG = 1.2;
+const PITCH_DEADZONE_DEG = 1.4;
+const MOUTH_BASELINE_ADAPT = 0.08;
+const MOUTH_OPEN_GAIN = 14;
+const TRACKING_DEPTH_MULTIPLIER = 28;
+const TRACKING_DEPTH_BASELINE = 0.13;
+const TRACKING_DEPTH_MIN = -3.8;
+const TRACKING_DEPTH_MAX = 0.2;
+const TRACKING_Z_OFFSET = -1.35;
 
 /* MEDIAPIPE */
 async function initMediaPipe() {
   if (mediaPipeInitialized) return;
-  const vision = await FilesetResolver.forVisionTasks(
-    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
-  );
+  if (mediaPipeInitializingPromise) return mediaPipeInitializingPromise;
+  mediaPipeInitializingPromise = (async () => {
+    const vision = await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+    );
+    console.log('[TrackingDiag] Initializing MediaPipe', {
+      mobile: IS_MOBILE_DEVICE,
+      delegate: MEDIAPIPE_DELEGATE
+    });
 
-  gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
-    baseOptions: {
-      modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
-      delegate: 'GPU'
-    },
-    runningMode: 'VIDEO',
-    numHands: 1,
-    minHandDetectionConfidence: 0.3,
-    minHandPresenceConfidence: 0.3,
-    minTrackingConfidence: 0.3
+    gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
+        delegate: MEDIAPIPE_DELEGATE
+      },
+      runningMode: 'VIDEO',
+      numHands: 1,
+      minHandDetectionConfidence: 0.3,
+      minHandPresenceConfidence: 0.3,
+      minTrackingConfidence: 0.3
+    });
+
+    faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+        delegate: MEDIAPIPE_DELEGATE
+      },
+      runningMode: 'VIDEO',
+      numFaces: 1,
+      refineLandmarks: true,
+      minFaceDetectionConfidence: 0.5,
+      minFacePresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    console.log('MediaPipe initialized successfully');
+    mediaPipeInitialized = true;
+  })().catch((err) => {
+    mediaPipeInitializingPromise = null;
+    throw err;
   });
 
-  faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-    baseOptions: {
-      modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
-      delegate: 'GPU'
-    },
-    runningMode: 'VIDEO',
-    numFaces: 1,
-    refineLandmarks: true,
-    minFaceDetectionConfidence: 0.5,
-    minFacePresenceConfidence: 0.5,
-    minTrackingConfidence: 0.5
-  });
+  return mediaPipeInitializingPromise;
+}
 
-  console.log('MediaPipe initialized successfully');
-  mediaPipeInitialized = true;
+function ensureDetectionLoopStarted() {
+  if (detectionLoopStarted) return;
+  detectionLoopStarted = true;
   startDetection();
 }
 
@@ -399,8 +483,45 @@ async function startAuthorizedTracking() {
 
   authorizedTrackingStartPromise = (async () => {
     try {
+      setTrackingDebug([
+        'startup: begin',
+        'camera: pending',
+        'mediapipe: pending',
+        'faces: -',
+        'tracking: false'
+      ]);
+      console.log('[TrackingDiag] Starting authorized tracking...');
       await initWebcam(video);
+      const webcamTrack = video.srcObject?.getVideoTracks?.()[0];
+      const webcamSettings = video.srcObject?.getVideoTracks?.()?.[0]?.getSettings?.();
+      console.log('[TrackingDiag] Webcam initialized. Video state:', {
+        readyState: video.readyState,
+        width: video.videoWidth,
+        height: video.videoHeight
+      });
+      syncOverlayCanvasSize();
+      setTrackingDebug([
+        'startup: webcam ok',
+        `camera: ${webcamSettings?.width || video.videoWidth || 0}x${webcamSettings?.height || video.videoHeight || 0}`,
+        `label: ${webcamTrack?.label || 'unknown'}`,
+        `readyState: ${video.readyState}`,
+        'mediapipe: pending',
+        'faces: -',
+        'tracking: false'
+      ]);
       await initMediaPipe();
+      console.log('[TrackingDiag] MediaPipe ready.');
+      setTrackingDebug([
+        'startup: mediapipe ok',
+        `camera: ${webcamSettings?.width || video.videoWidth || 0}x${webcamSettings?.height || video.videoHeight || 0}`,
+        `label: ${webcamTrack?.label || 'unknown'}`,
+        `readyState: ${video.readyState}`,
+        'mediapipe: ready',
+        'faces: -',
+        'tracking: false'
+      ]);
+      ensureDetectionLoopStarted();
+      console.log('[TrackingDiag] Detection loop started.');
       initWaterModeScheduler();
       authorizedTrackingStarted = true;
       trackingRetryCount = 0;
@@ -429,44 +550,21 @@ function scheduleTrackingRetry(lastError) {
     delayMs: TRACKING_RETRY_DELAY_MS,
     error: lastError?.message || String(lastError)
   });
+  setTrackingDebug([
+    `startup: retry ${trackingRetryCount}`,
+    `error: ${lastError?.message || String(lastError)}`,
+    `readyState: ${video?.readyState ?? '-'}`,
+    `video: ${video?.videoWidth || 0}x${video?.videoHeight || 0}`,
+    `label: ${video?.srcObject?.getVideoTracks?.()[0]?.label || 'unknown'}`,
+    'mediapipe: retrying',
+    `tracking: ${isTracking}`
+  ]);
   gestureIndicator.classList.add('active');
   gestureIndicator.textContent = `Tracking retry ${trackingRetryCount}...`;
   trackingRetryTimer = setTimeout(() => {
     trackingRetryTimer = null;
     startAuthorizedTracking().catch((err) => scheduleTrackingRetry(err));
   }, TRACKING_RETRY_DELAY_MS);
-}
-
-function initFaceAuthGate() {
-  const setWaitingState = () => {
-    gestureIndicator.classList.add('active');
-    gestureIndicator.textContent = 'Waiting for face authorization...';
-  };
-
-  const handleFaceAuth = (passed) => {
-    if (passed) {
-      startAuthorizedTracking().catch((err) => {
-        console.error('Failed to start tracking after face authorization:', err);
-        scheduleTrackingRetry(err);
-      });
-      return;
-    }
-    gestureIndicator.classList.add('active');
-    gestureIndicator.textContent = 'Face authorization failed';
-  };
-
-  window.addEventListener('faceauth', (e) => {
-    const passed = Boolean(e.detail?.passed);
-    handleFaceAuth(passed);
-  });
-
-  if (window.faceAuthPassed === true) {
-    handleFaceAuth(true);
-  } else if (window.faceAuthPassed === false) {
-    handleFaceAuth(false);
-  } else {
-    setWaitingState();
-  }
 }
 
 /* EDIT MODE TOGGLE */
@@ -482,6 +580,13 @@ renderer.domElement.addEventListener('click', (event) => {
   const intersects = raycaster.intersectObjects(closeButtonMesh.children, true);
   if (intersects.length > 0) toggleOverlay();
 });
+
+if (IS_MOBILE_DEVICE) {
+  renderer.domElement.addEventListener('touchstart', handleMobileTouchStart, { passive: false });
+  renderer.domElement.addEventListener('touchmove', handleMobileTouchMove, { passive: false });
+  renderer.domElement.addEventListener('touchend', handleMobileTouchEnd, { passive: false });
+  renderer.domElement.addEventListener('touchcancel', handleMobileTouchEnd, { passive: false });
+}
 
 document.addEventListener('keydown', (e) => {
   if (e.code === 'Space') {
@@ -581,6 +686,135 @@ function toggleOverlay() {
       });
     }
   }
+}
+
+function getTouchDistance(touchA, touchB) {
+  return Math.hypot(touchA.clientX - touchB.clientX, touchA.clientY - touchB.clientY);
+}
+
+function isCloseButtonTouched(touch) {
+  if (!overlayActive || !closeButtonMesh) return false;
+  const rect = renderer.domElement.getBoundingClientRect();
+  mouse.x = ((touch.clientX - rect.left) / rect.width) * 2 - 1;
+  mouse.y = -((touch.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const intersects = raycaster.intersectObjects(closeButtonMesh.children, true);
+  return intersects.length > 0;
+}
+
+function resetMobileTouchState() {
+  mobileTouchMode = null;
+  mobileTouchInitialDistance = -1;
+  mobileTouchBaselineScale = currentScale;
+  mobileTouchBaselineRotationY = currentRotationY;
+  mobileTouchBaselinePositionY = currentPositionY;
+}
+
+function handleMobileTouchStart(event) {
+  if (waterModeActive) return;
+  const touchCount = event.touches.length;
+
+  if (touchCount === 1) {
+    const touch = event.touches[0];
+    if (overlayActive && isCloseButtonTouched(touch)) {
+      event.preventDefault();
+      toggleOverlay();
+      resetMobileTouchState();
+      return;
+    }
+
+    const now = Date.now();
+    if (!overlayActive && now - mobileLastTapTime <= MOBILE_DOUBLE_TAP_MS) {
+      event.preventDefault();
+      toggleOverlay();
+      mobileLastTapTime = 0;
+    } else {
+      mobileLastTapTime = now;
+    }
+
+    if (!overlayActive) return;
+
+    event.preventDefault();
+    mobileTouchMode = 'drag';
+    mobileTouchStartX = touch.clientX;
+    mobileTouchStartY = touch.clientY;
+    mobileTouchBaselineRotationY = currentRotationY;
+    mobileTouchBaselinePositionY = currentPositionY;
+    return;
+  }
+
+  if (!overlayActive || touchCount < 2) return;
+
+  event.preventDefault();
+  mobileTouchMode = 'pinch';
+  mobileTouchInitialDistance = getTouchDistance(event.touches[0], event.touches[1]);
+  mobileTouchBaselineScale = currentScale;
+}
+
+function handleMobileTouchMove(event) {
+  if (!overlayActive || waterModeActive) return;
+
+  if (mobileTouchMode === 'drag' && event.touches.length === 1) {
+    event.preventDefault();
+    const touch = event.touches[0];
+    const deltaX = touch.clientX - mobileTouchStartX;
+    const deltaY = touch.clientY - mobileTouchStartY;
+    targetRotationY = THREE.MathUtils.clamp(
+      mobileTouchBaselineRotationY + deltaX * MOBILE_ROTATION_DRAG_FACTOR,
+      -MAX_ROTATION,
+      MAX_ROTATION
+    );
+    targetPositionY = THREE.MathUtils.clamp(
+      mobileTouchBaselinePositionY - deltaY * MOBILE_POSITION_DRAG_FACTOR,
+      MIN_POSITION_Y,
+      MAX_POSITION_Y
+    );
+    return;
+  }
+
+  if (mobileTouchMode === 'pinch' && event.touches.length >= 2) {
+    event.preventDefault();
+    const currentDistance = getTouchDistance(event.touches[0], event.touches[1]);
+    if (mobileTouchInitialDistance <= 0) {
+      mobileTouchInitialDistance = currentDistance;
+      return;
+    }
+    const distanceDelta = currentDistance - mobileTouchInitialDistance;
+    const scaleMultiplier = 1 + distanceDelta * MOBILE_PINCH_SCALE_FACTOR;
+    targetScale = THREE.MathUtils.clamp(
+      mobileTouchBaselineScale * scaleMultiplier,
+      baselineScale * MIN_SCALE_RATIO,
+      baselineScale * MAX_SCALE_RATIO
+    );
+  }
+}
+
+function handleMobileTouchEnd(event) {
+  if (waterModeActive) return;
+
+  if (!overlayActive) {
+    resetMobileTouchState();
+    return;
+  }
+
+  if (event.touches.length >= 2) {
+    mobileTouchMode = 'pinch';
+    mobileTouchInitialDistance = getTouchDistance(event.touches[0], event.touches[1]);
+    mobileTouchBaselineScale = targetScale;
+    return;
+  }
+
+  if (event.touches.length === 1) {
+    const touch = event.touches[0];
+    mobileTouchMode = 'drag';
+    mobileTouchStartX = touch.clientX;
+    mobileTouchStartY = touch.clientY;
+    mobileTouchBaselineRotationY = targetRotationY;
+    mobileTouchBaselinePositionY = targetPositionY;
+    return;
+  }
+
+  resetMobileTouchState();
 }
 
 function maybeRequestNotificationPermission() {
@@ -755,7 +989,6 @@ function initNotificationPermissionHooks() {
 function startDetection() {
   async function detectLoop() {
     if (video.readyState >= 2) {
-      const currentTime = video.currentTime;
       const now = performance.now();
       if (now - lastProcessTime < PROCESS_INTERVAL) {
         requestAnimationFrame(detectLoop);
@@ -763,116 +996,144 @@ function startDetection() {
       }
       lastProcessTime = now;
 
-      if (currentTime !== lastVideoTime) {
-        lastVideoTime = currentTime;
+      if (gestureRecognizer) {
+        const gestureInterval = (overlayActive || waterModeActive)
+          ? GESTURE_PROCESS_INTERVAL_ACTIVE
+          : GESTURE_PROCESS_INTERVAL_IDLE;
+        if (now - lastGestureProcessTime >= gestureInterval) {
+          lastGestureProcessTime = now;
+          const gestureResults = gestureRecognizer.recognizeForVideo(video, now);
+          const handLandmarks = gestureResults.landmarks?.[0] || null;
+          drawHandOverlay(handLandmarks);
+          if (gestureResults.gestures && gestureResults.gestures.length > 0) {
+            const topGesture = gestureResults.gestures[0][0];
+            const isOpenPalm = topGesture.categoryName === 'Open_Palm' && topGesture.score > 0.45;
+            const isWaterStopGesture = topGesture.categoryName === 'Closed_Fist' && topGesture.score > 0.45;
 
-        if (gestureRecognizer) {
-            const gestureResults = gestureRecognizer.recognizeForVideo(video, performance.now());
-            if (gestureResults.gestures && gestureResults.gestures.length > 0) {
-              const topGesture = gestureResults.gestures[0][0];
-              const handLandmarks = gestureResults.landmarks[0];
-              const isOpenPalm = topGesture.categoryName === 'Open_Palm' && topGesture.score > 0.45;
-              const isWaterStopGesture = topGesture.categoryName === 'Closed_Fist' && topGesture.score > 0.45;
+            if (waterModeActive && isWaterStopGesture) {
+              waterStopHoldFrames++;
+              gestureIndicator.classList.add('active');
+              gestureIndicator.textContent = `Water Stop ${waterStopHoldFrames}/${WATER_STOP_HOLD_THRESHOLD}`;
+              if (waterStopHoldFrames >= WATER_STOP_HOLD_THRESHOLD) {
+                stopWaterMode('gesture');
+              }
+            } else if (!waterModeActive && isOpenPalm) {
+              waterStopHoldFrames = 0;
+              consecutivePalmDetections++;
+              gestureIndicator.classList.add('active');
+              gestureIndicator.textContent = `Palm ${topGesture.score.toFixed(2)}`;
 
-              if (waterModeActive && isWaterStopGesture) {
-                waterStopHoldFrames++;
-                overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-                gestureIndicator.classList.add('active');
-                gestureIndicator.textContent = `Water Stop ${waterStopHoldFrames}/${WATER_STOP_HOLD_THRESHOLD}`;
-                if (waterStopHoldFrames >= WATER_STOP_HOLD_THRESHOLD) {
-                  stopWaterMode('gesture');
+              if (consecutivePalmDetections >= REQUIRED_CONSECUTIVE_DETECTIONS) {
+                palmHoldFrames++;
+                gestureIndicator.textContent = `Palm ${palmHoldFrames}/${PALM_HOLD_THRESHOLD} (${topGesture.score.toFixed(2)})`;
+                if (palmHoldFrames >= PALM_HOLD_THRESHOLD) {
+                  toggleOverlay();
+                  palmHoldFrames = 0;
+                  consecutivePalmDetections = 0;
+                  gestureIndicator.textContent = 'Mode Toggled';
                 }
-              } else if (!waterModeActive && isOpenPalm) {
-                waterStopHoldFrames = 0;
-                consecutivePalmDetections++;
-                overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-                gestureIndicator.classList.add('active');
-                gestureIndicator.textContent = `Palm ${topGesture.score.toFixed(2)}`;
-
-                if (consecutivePalmDetections >= REQUIRED_CONSECUTIVE_DETECTIONS) {
-                  palmHoldFrames++;
-                  gestureIndicator.textContent = `Palm ${palmHoldFrames}/${PALM_HOLD_THRESHOLD} (${topGesture.score.toFixed(2)})`;
-                  if (palmHoldFrames >= PALM_HOLD_THRESHOLD) {
-                    toggleOverlay();
-                    palmHoldFrames = 0;
-                    consecutivePalmDetections = 0;
-                    gestureIndicator.textContent = 'Mode Toggled';
-                  }
-                }
-              } else if (overlayActive && handLandmarks && topGesture.categoryName !== 'Open_Palm') {
-                waterStopHoldFrames = 0;
-                const pinchData = detectPinchGesture(handLandmarks);
-                if (pinchData) {
-                  handlePinchControl(pinchData, handLandmarks);
-                }
-              } else {
-                waterStopHoldFrames = 0;
-                clearGestureState();
+              }
+            } else if (overlayActive && handLandmarks && topGesture.categoryName !== 'Open_Palm') {
+              waterStopHoldFrames = 0;
+              const pinchData = detectPinchGesture(handLandmarks);
+              if (pinchData) {
+                handlePinchControl(pinchData, handLandmarks);
               }
             } else {
               waterStopHoldFrames = 0;
               clearGestureState();
-              resetPinchTracking();
             }
+          } else {
+            waterStopHoldFrames = 0;
+            clearGestureState();
+            resetPinchTracking();
+          }
+        }
+      }
+
+      if (faceLandmarker && !overlayActive) {
+        const faceResults = faceLandmarker.detectForVideo(video, now);
+        setTrackingDebug([
+          'startup: running',
+          `readyState: ${video.readyState}`,
+          `video: ${video.videoWidth || 0}x${video.videoHeight || 0}`,
+          `label: ${video.srcObject?.getVideoTracks?.()[0]?.label || 'unknown'}`,
+          `mediapipe: ${mediaPipeInitialized ? 'ready' : 'loading'}`,
+          `faces: ${faceResults.faceLandmarks?.length || 0}`,
+          `tracking: ${isTracking}`
+        ]);
+        if (now - lastFaceDiagLogTime > 1500) {
+          lastFaceDiagLogTime = now;
+          console.log('[TrackingDiag] Face loop heartbeat', {
+            readyState: video.readyState,
+            width: video.videoWidth,
+            height: video.videoHeight,
+            faces: faceResults.faceLandmarks?.length || 0,
+            isTracking
+          });
+        }
+        if (!faceResults.faceLandmarks || faceResults.faceLandmarks.length === 0) {
+          lostFrames++;
+          if (lostFrames > 24) isTracking = false;
+          mouthOpen *= 0.9;
+        } else {
+          const hadTracking = isTracking;
+          lostFrames = 0;
+          isTracking = true;
+          const lm = faceResults.faceLandmarks[0];
+
+          const nose = lm[1];
+          const nx = (nose.x - 0.5) * 2;
+          const ny = (nose.y - 0.5) * 2;
+          const measuredEyeX = THREE.MathUtils.clamp(Math.tanh(nx * 5), -1, 1);
+          const measuredEyeY = THREE.MathUtils.clamp(Math.tanh(ny * 8), -1, 1);
+          if (!hadTracking) {
+            eyeTrackedX = measuredEyeX;
+            eyeTrackedY = measuredEyeY;
+          } else {
+            eyeTrackedX += (measuredEyeX - eyeTrackedX) * EYE_INPUT_SMOOTHING;
+            eyeTrackedY += (measuredEyeY - eyeTrackedY) * EYE_INPUT_SMOOTHING;
           }
 
-          if (faceLandmarker && !overlayActive) {
-            const faceResults = faceLandmarker.detectForVideo(video, performance.now());
-            if (!faceResults.faceLandmarks || faceResults.faceLandmarks.length === 0) {
-              lostFrames++;
-              if (lostFrames > 15) isTracking = false;
-            } else {
-              const hadTracking = isTracking;
-              lostFrames = 0;
-              isTracking = true;
-              const lm = faceResults.faceLandmarks[0];
-
-              const nose = lm[1];
-              const nx = (nose.x - 0.5) * 2;
-              const ny = (nose.y - 0.5) * 2;
-              const measuredEyeX = THREE.MathUtils.clamp(Math.tanh(nx * 5), -1, 1);
-              const measuredEyeY = THREE.MathUtils.clamp(Math.tanh(ny * 8), -1, 1);
-              if (!hadTracking) {
-                eyeTrackedX = measuredEyeX;
-                eyeTrackedY = measuredEyeY;
-              } else {
-                eyeTrackedX += (measuredEyeX - eyeTrackedX) * EYE_INPUT_SMOOTHING;
-                eyeTrackedY += (measuredEyeY - eyeTrackedY) * EYE_INPUT_SMOOTHING;
-              }
-
-              const dx = lm[263].x - lm[33].x;
-              const dy = lm[263].y - lm[33].y;
-              const measuredRoll = THREE.MathUtils.radToDeg(Math.atan2(dy, dx));
-              if (!hadTracking) {
-                faceRoll = measuredRoll;
-              } else {
-                faceRoll += (measuredRoll - faceRoll) * ROLL_INPUT_SMOOTHING;
-              }
-              if (Math.abs(faceRoll) < ROLL_DEADZONE_DEG) faceRoll = 0;
-
-              const faceHeight = lm[152].y - lm[10].y;
-              if (neutralHeight === null) neutralHeight = faceHeight;
-              const rawPitch = (faceHeight - neutralHeight) * 300 * -1;
-              // Reduce false "looking down/up" caused by strong left/right head roll.
-              const rollCoupling = THREE.MathUtils.clamp(Math.abs(faceRoll) / 30, 0, 1);
-              const measuredPitch = rawPitch * (1 - 0.45 * rollCoupling);
-              if (!hadTracking) {
-                facePitch = measuredPitch;
-              } else {
-                facePitch += (measuredPitch - facePitch) * PITCH_INPUT_SMOOTHING;
-              }
-
-              const eyeDist = Math.hypot(dx, dy);
-              rawEyeDist = eyeDist;
-              if (baselineEyeDist === null && !inceptionCaptured) baselineEyeDist = eyeDist;
-
-              const top = lm[13];
-              const bottom = lm[14];
-              mouthOpen = THREE.MathUtils.clamp((bottom.y - top.y) * 20, 0, 1);
-            }
-          } else if (overlayActive) {
-            isTracking = false;
+          const dx = lm[263].x - lm[33].x;
+          const dy = lm[263].y - lm[33].y;
+          const measuredRoll = THREE.MathUtils.radToDeg(Math.atan2(dy, dx));
+          if (!hadTracking) {
+            faceRoll = measuredRoll;
+          } else {
+            faceRoll += (measuredRoll - faceRoll) * ROLL_INPUT_SMOOTHING;
           }
+          if (Math.abs(faceRoll) < ROLL_DEADZONE_DEG) faceRoll = 0;
+
+          const faceHeight = lm[152].y - lm[10].y;
+          if (neutralHeight === null) neutralHeight = faceHeight;
+          const rawPitch = (faceHeight - neutralHeight) * 220 * -1;
+          const rollCoupling = THREE.MathUtils.clamp(Math.abs(faceRoll) / 30, 0, 1);
+          const measuredPitch = rawPitch * (1 - 0.45 * rollCoupling);
+          if (!hadTracking) {
+            facePitch = measuredPitch;
+          } else {
+            facePitch += (measuredPitch - facePitch) * PITCH_INPUT_SMOOTHING;
+          }
+          if (Math.abs(facePitch) < PITCH_DEADZONE_DEG) facePitch = 0;
+
+          const eyeDist = Math.hypot(dx, dy);
+          rawEyeDist = eyeDist;
+          if (baselineEyeDist === null && !inceptionCaptured) baselineEyeDist = eyeDist;
+
+          const top = lm[13];
+          const bottom = lm[14];
+          const mouthGap = Math.max(0, bottom.y - top.y);
+          const mouthRatio = eyeDist > 1e-5 ? mouthGap / eyeDist : 0;
+          if (neutralMouthRatio === null || !hadTracking) {
+            neutralMouthRatio = mouthRatio;
+          } else if (mouthRatio <= neutralMouthRatio + 0.015) {
+            neutralMouthRatio += (mouthRatio - neutralMouthRatio) * MOUTH_BASELINE_ADAPT;
+          }
+          mouthOpen = THREE.MathUtils.clamp((mouthRatio - neutralMouthRatio) * MOUTH_OPEN_GAIN, 0, 1);
+        }
+      } else if (overlayActive) {
+        isTracking = false;
       }
     }
 
@@ -884,7 +1145,6 @@ function startDetection() {
 
 function clearGestureState() {
   if (waterModeActive) return;
-  overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
   if (consecutivePalmDetections > 0) consecutivePalmDetections--;
   if (consecutivePalmDetections === 0) {
     palmHoldFrames = 0;
@@ -916,7 +1176,6 @@ function handlePinchControl(pinchData, handLandmarks) {
     pinchLostFrames++;
     if (pinchLostFrames > PINCH_LOST_THRESHOLD) {
       resetPinchTracking();
-      overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
     }
     return;
   }
@@ -943,19 +1202,24 @@ function handlePinchControl(pinchData, handLandmarks) {
   if (initialIndexFingerY === -1) initialIndexFingerY = smoothedY;
   if (initialIndexFingerX === -1) initialIndexFingerX = smoothedX;
 
-  const deltaY = smoothedY - initialIndexFingerY;
-  const rotationAmount = deltaY * 8;
-  targetRotationY = THREE.MathUtils.clamp(baselineRotationY + rotationAmount, -MAX_ROTATION, MAX_ROTATION);
-
   const deltaX = smoothedX - initialIndexFingerX;
-  const positionAmount = -deltaX * 10;
   if (IS_MOBILE_DEVICE) {
+    const rotationAmount = deltaX * 8;
+    targetRotationY = THREE.MathUtils.clamp(baselineRotationY + rotationAmount, -MAX_ROTATION, MAX_ROTATION);
+
+    const deltaY = smoothedY - initialIndexFingerY;
+    const positionAmount = -deltaY * 10;
     targetPositionY = THREE.MathUtils.clamp(baselinePositionY + positionAmount, MIN_POSITION_Y, MAX_POSITION_Y);
   } else {
+    const deltaY = smoothedY - initialIndexFingerY;
+    const rotationAmount = deltaY * 8;
+    targetRotationY = THREE.MathUtils.clamp(baselineRotationY + rotationAmount, -MAX_ROTATION, MAX_ROTATION);
+
+    const positionAmount = -deltaX * 10;
     targetPositionX = THREE.MathUtils.clamp(baselinePositionX + positionAmount, -MAX_POSITION_X, MAX_POSITION_X);
   }
 
-  drawPinchVisualization(thumbX, thumbY, indexX, indexY);
+  drawHandOverlay(handLandmarks, { pinchPoints: [[thumbX, thumbY], [indexX, indexY]] });
   const scalePercent = ((targetScale / baselineScale) * 100).toFixed(0);
   const rotationDeg = (currentRotationY * 180 / Math.PI).toFixed(0);
   const positionX = currentPositionX.toFixed(1);
@@ -966,32 +1230,55 @@ function handlePinchControl(pinchData, handLandmarks) {
     : `Scale: ${scalePercent}% | Rot: ${rotationDeg} | Pos: ${positionX}`;
 }
 
-function drawPinchVisualization(thumbX, thumbY, indexX, indexY) {
+function drawHandOverlay(handLandmarks, options = {}) {
+  syncOverlayCanvasSize();
   overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-  overlayCtx.strokeStyle = '#4CAF50';
-  overlayCtx.lineWidth = 3;
-  overlayCtx.beginPath();
-  overlayCtx.moveTo(thumbX, thumbY);
-  overlayCtx.lineTo(indexX, indexY);
-  overlayCtx.stroke();
+  if (!handLandmarks?.length) return;
 
-  overlayCtx.fillStyle = '#4CAF50';
-  overlayCtx.beginPath();
-  overlayCtx.arc(thumbX, thumbY, 6, 0, 2 * Math.PI);
-  overlayCtx.fill();
-  overlayCtx.beginPath();
-  overlayCtx.arc(indexX, indexY, 6, 0, 2 * Math.PI);
-  overlayCtx.fill();
+  const points = handLandmarks.map((landmark) => ({
+    x: landmark.x * overlayCanvas.width,
+    y: landmark.y * overlayCanvas.height
+  }));
+
+  overlayCtx.strokeStyle = 'rgba(121, 255, 198, 0.95)';
+  overlayCtx.lineWidth = 2;
+  overlayCtx.lineCap = 'round';
+  overlayCtx.lineJoin = 'round';
+  HAND_CONNECTIONS.forEach(([startIndex, endIndex]) => {
+    const startPoint = points[startIndex];
+    const endPoint = points[endIndex];
+    if (!startPoint || !endPoint) return;
+    overlayCtx.beginPath();
+    overlayCtx.moveTo(startPoint.x, startPoint.y);
+    overlayCtx.lineTo(endPoint.x, endPoint.y);
+    overlayCtx.stroke();
+  });
+
+  overlayCtx.fillStyle = '#ffffff';
+  points.forEach((point, index) => {
+    const radius = index === 0 ? 4.2 : 3.1;
+    overlayCtx.beginPath();
+    overlayCtx.arc(point.x, point.y, radius, 0, 2 * Math.PI);
+    overlayCtx.fill();
+  });
+
+  const pinchPoints = options.pinchPoints || null;
+  if (pinchPoints) {
+    overlayCtx.strokeStyle = '#4CAF50';
+    overlayCtx.lineWidth = 3;
+    overlayCtx.beginPath();
+    overlayCtx.moveTo(pinchPoints[0][0], pinchPoints[0][1]);
+    overlayCtx.lineTo(pinchPoints[1][0], pinchPoints[1][1]);
+    overlayCtx.stroke();
+  }
 }
 
 /* AVATAR UPDATE */
 function updateMouth(delta) {
   if (!lipsMesh || !mouthMesh) return;
-  if (isTracking) {
-    const trackedMouth = mouthOpen;
-    const mouthLerp = 1 - Math.exp(-delta / Math.max(1e-6, SMOOTH_TIME_MOUTH));
-    mouthCurrent += (trackedMouth - mouthCurrent) * mouthLerp;
-  }
+  const trackedMouth = isTracking ? mouthOpen : 0;
+  const mouthLerp = 1 - Math.exp(-delta / Math.max(1e-6, SMOOTH_TIME_MOUTH));
+  mouthCurrent += (trackedMouth - mouthCurrent) * mouthLerp;
 
   const v = THREE.MathUtils.smoothstep(mouthCurrent, 0.08, 0.65);
   const shapes = ['BMP', 'hmmm', 'O', 'Nooo', 'Ohhhh', 'ANGRY'];
@@ -1175,13 +1462,13 @@ function animate() {
       const eyeDistLerp = 1 - Math.exp(-delta / Math.max(1e-6, EYE_DIST_SMOOTH_TIME));
       smoothedEyeDist += (rawEyeDist - smoothedEyeDist) * eyeDistLerp;
       if (!inceptionCaptured) {
-        faceDepth = (baselineEyeDist - 0.13) * 40;
-        faceDepth = THREE.MathUtils.clamp(faceDepth, -2.5, 1.8);
+        faceDepth = (baselineEyeDist - TRACKING_DEPTH_BASELINE) * TRACKING_DEPTH_MULTIPLIER + TRACKING_Z_OFFSET;
+        faceDepth = THREE.MathUtils.clamp(faceDepth, TRACKING_DEPTH_MIN, TRACKING_DEPTH_MAX);
         inceptionCaptured = true;
       } else {
-        const depthChange = (smoothedEyeDist - baselineEyeDist) * 40;
-        faceDepth = (baselineEyeDist - 0.13) * 40 + depthChange;
-        faceDepth = THREE.MathUtils.clamp(faceDepth, -2.5, 1.8);
+        const depthChange = (smoothedEyeDist - baselineEyeDist) * TRACKING_DEPTH_MULTIPLIER;
+        faceDepth = (baselineEyeDist - TRACKING_DEPTH_BASELINE) * TRACKING_DEPTH_MULTIPLIER + depthChange + TRACKING_Z_OFFSET;
+        faceDepth = THREE.MathUtils.clamp(faceDepth, TRACKING_DEPTH_MIN, TRACKING_DEPTH_MAX);
       }
     }
 
@@ -1203,7 +1490,10 @@ function animate() {
 }
 
 initNotificationPermissionHooks();
-initFaceAuthGate();
+startAuthorizedTracking().catch((err) => {
+  console.error('Failed to start tracking on launch:', err);
+  scheduleTrackingRetry(err);
+});
 animate();
 
 export {
