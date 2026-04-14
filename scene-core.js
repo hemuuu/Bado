@@ -62,30 +62,6 @@ const loader = new GLTFLoader();
 loadModel(DEFAULT_MODEL_PATH);
 loadPersistentWaterState();
 
-const trackingDebugPanel = document.createElement('div');
-trackingDebugPanel.style.cssText = [
-  'position:fixed',
-  'left:12px',
-  'bottom:12px',
-  'z-index:6000',
-  'min-width:220px',
-  'max-width:70vw',
-  'padding:10px 12px',
-  'border-radius:10px',
-  'background:rgba(8,12,24,0.78)',
-  'border:1px solid rgba(255,255,255,0.12)',
-  'color:#eaf2ff',
-  'font:12px/1.45 monospace',
-  'white-space:pre-wrap',
-  'pointer-events:none'
-].join(';');
-trackingDebugPanel.textContent = 'TrackingDiag\nbooting...';
-document.body.appendChild(trackingDebugPanel);
-
-function setTrackingDebug(lines) {
-  trackingDebugPanel.textContent = ['TrackingDiag', ...lines].join('\n');
-}
-
 function disposeCurrentModel() {
   if (!model) return;
   if (mixer) {
@@ -292,6 +268,7 @@ const video = document.getElementById('webcam');
 const overlayCanvas = document.getElementById('overlayCanvas');
 const overlayCtx = overlayCanvas.getContext('2d');
 const webcamContainer = document.getElementById('webcamContainer');
+const webcamChrome = document.getElementById('webcamChrome');
 const HAND_CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
@@ -309,6 +286,9 @@ let detectionLoopStarted = false;
 let trackingRetryTimer = null;
 let trackingRetryCount = 0;
 const TRACKING_RETRY_DELAY_MS = 3000;
+let webcamDragPointerId = null;
+let webcamDragOffsetX = 0;
+let webcamDragOffsetY = 0;
 
 function syncOverlayCanvasSize() {
   const viewportWidth = overlayCanvas.clientWidth || webcamContainer.clientWidth || 220;
@@ -318,6 +298,61 @@ function syncOverlayCanvasSize() {
 }
 
 window.addEventListener('resize', syncOverlayCanvasSize);
+window.addEventListener('resize', clampWebcamPosition);
+
+if (webcamChrome) {
+  webcamChrome.addEventListener('pointerdown', beginWebcamDrag);
+}
+
+function beginWebcamDrag(event) {
+  if (event.button != null && event.button !== 0) return;
+  const rect = webcamContainer.getBoundingClientRect();
+  webcamDragPointerId = event.pointerId;
+  webcamDragOffsetX = event.clientX - rect.left;
+  webcamDragOffsetY = event.clientY - rect.top;
+  webcamContainer.style.left = `${rect.left}px`;
+  webcamContainer.style.top = `${rect.top}px`;
+  webcamContainer.style.right = 'auto';
+  webcamChrome.classList.add('dragging');
+  webcamChrome.setPointerCapture?.(event.pointerId);
+  window.addEventListener('pointermove', handleWebcamDrag);
+  window.addEventListener('pointerup', endWebcamDrag);
+  window.addEventListener('pointercancel', endWebcamDrag);
+  event.preventDefault();
+}
+
+function handleWebcamDrag(event) {
+  if (event.pointerId !== webcamDragPointerId) return;
+  const nextLeft = event.clientX - webcamDragOffsetX;
+  const nextTop = event.clientY - webcamDragOffsetY;
+  const maxLeft = Math.max(0, window.innerWidth - webcamContainer.offsetWidth);
+  const maxTop = Math.max(0, window.innerHeight - webcamContainer.offsetHeight);
+  const clampedLeft = THREE.MathUtils.clamp(nextLeft, 0, maxLeft);
+  const clampedTop = THREE.MathUtils.clamp(nextTop, 0, maxTop);
+  webcamContainer.style.left = `${clampedLeft}px`;
+  webcamContainer.style.top = `${clampedTop}px`;
+}
+
+function endWebcamDrag(event) {
+  if (event.pointerId !== webcamDragPointerId) return;
+  webcamChrome.classList.remove('dragging');
+  webcamChrome.releasePointerCapture?.(event.pointerId);
+  webcamDragPointerId = null;
+  window.removeEventListener('pointermove', handleWebcamDrag);
+  window.removeEventListener('pointerup', endWebcamDrag);
+  window.removeEventListener('pointercancel', endWebcamDrag);
+}
+
+function clampWebcamPosition() {
+  const inlineLeft = webcamContainer.style.left;
+  if (!inlineLeft) return;
+  const currentLeft = Number.parseFloat(inlineLeft) || 0;
+  const currentTop = Number.parseFloat(webcamContainer.style.top) || 0;
+  const maxLeft = Math.max(0, window.innerWidth - webcamContainer.offsetWidth);
+  const maxTop = Math.max(0, window.innerHeight - webcamContainer.offsetHeight);
+  webcamContainer.style.left = `${THREE.MathUtils.clamp(currentLeft, 0, maxLeft)}px`;
+  webcamContainer.style.top = `${THREE.MathUtils.clamp(currentTop, 0, maxTop)}px`;
+}
 
 /* UI / MODES */
 const gestureIndicator = document.getElementById('gestureIndicator');
@@ -483,13 +518,6 @@ async function startAuthorizedTracking() {
 
   authorizedTrackingStartPromise = (async () => {
     try {
-      setTrackingDebug([
-        'startup: begin',
-        'camera: pending',
-        'mediapipe: pending',
-        'faces: -',
-        'tracking: false'
-      ]);
       console.log('[TrackingDiag] Starting authorized tracking...');
       await initWebcam(video);
       const webcamTrack = video.srcObject?.getVideoTracks?.()[0];
@@ -500,26 +528,8 @@ async function startAuthorizedTracking() {
         height: video.videoHeight
       });
       syncOverlayCanvasSize();
-      setTrackingDebug([
-        'startup: webcam ok',
-        `camera: ${webcamSettings?.width || video.videoWidth || 0}x${webcamSettings?.height || video.videoHeight || 0}`,
-        `label: ${webcamTrack?.label || 'unknown'}`,
-        `readyState: ${video.readyState}`,
-        'mediapipe: pending',
-        'faces: -',
-        'tracking: false'
-      ]);
       await initMediaPipe();
       console.log('[TrackingDiag] MediaPipe ready.');
-      setTrackingDebug([
-        'startup: mediapipe ok',
-        `camera: ${webcamSettings?.width || video.videoWidth || 0}x${webcamSettings?.height || video.videoHeight || 0}`,
-        `label: ${webcamTrack?.label || 'unknown'}`,
-        `readyState: ${video.readyState}`,
-        'mediapipe: ready',
-        'faces: -',
-        'tracking: false'
-      ]);
       ensureDetectionLoopStarted();
       console.log('[TrackingDiag] Detection loop started.');
       initWaterModeScheduler();
@@ -550,15 +560,6 @@ function scheduleTrackingRetry(lastError) {
     delayMs: TRACKING_RETRY_DELAY_MS,
     error: lastError?.message || String(lastError)
   });
-  setTrackingDebug([
-    `startup: retry ${trackingRetryCount}`,
-    `error: ${lastError?.message || String(lastError)}`,
-    `readyState: ${video?.readyState ?? '-'}`,
-    `video: ${video?.videoWidth || 0}x${video?.videoHeight || 0}`,
-    `label: ${video?.srcObject?.getVideoTracks?.()[0]?.label || 'unknown'}`,
-    'mediapipe: retrying',
-    `tracking: ${isTracking}`
-  ]);
   gestureIndicator.classList.add('active');
   gestureIndicator.textContent = `Tracking retry ${trackingRetryCount}...`;
   trackingRetryTimer = setTimeout(() => {
@@ -1004,13 +1005,15 @@ function startDetection() {
           lastGestureProcessTime = now;
           const gestureResults = gestureRecognizer.recognizeForVideo(video, now);
           const handLandmarks = gestureResults.landmarks?.[0] || null;
-          drawHandOverlay(handLandmarks);
+          let overlayLabel = null;
+          let handOverlayDrawn = false;
           if (gestureResults.gestures && gestureResults.gestures.length > 0) {
             const topGesture = gestureResults.gestures[0][0];
             const isOpenPalm = topGesture.categoryName === 'Open_Palm' && topGesture.score > 0.45;
             const isWaterStopGesture = topGesture.categoryName === 'Closed_Fist' && topGesture.score > 0.45;
 
             if (waterModeActive && isWaterStopGesture) {
+              overlayLabel = 'Stop Water';
               waterStopHoldFrames++;
               gestureIndicator.classList.add('active');
               gestureIndicator.textContent = `Water Stop ${waterStopHoldFrames}/${WATER_STOP_HOLD_THRESHOLD}`;
@@ -1018,6 +1021,7 @@ function startDetection() {
                 stopWaterMode('gesture');
               }
             } else if (!waterModeActive && isOpenPalm) {
+              overlayLabel = 'Toggle';
               waterStopHoldFrames = 0;
               consecutivePalmDetections++;
               gestureIndicator.classList.add('active');
@@ -1038,6 +1042,7 @@ function startDetection() {
               const pinchData = detectPinchGesture(handLandmarks);
               if (pinchData) {
                 handlePinchControl(pinchData, handLandmarks);
+                handOverlayDrawn = true;
               }
             } else {
               waterStopHoldFrames = 0;
@@ -1048,20 +1053,14 @@ function startDetection() {
             clearGestureState();
             resetPinchTracking();
           }
+          if (!handOverlayDrawn) {
+            drawHandOverlay(handLandmarks, { label: overlayLabel });
+          }
         }
       }
 
       if (faceLandmarker && !overlayActive) {
         const faceResults = faceLandmarker.detectForVideo(video, now);
-        setTrackingDebug([
-          'startup: running',
-          `readyState: ${video.readyState}`,
-          `video: ${video.videoWidth || 0}x${video.videoHeight || 0}`,
-          `label: ${video.srcObject?.getVideoTracks?.()[0]?.label || 'unknown'}`,
-          `mediapipe: ${mediaPipeInitialized ? 'ready' : 'loading'}`,
-          `faces: ${faceResults.faceLandmarks?.length || 0}`,
-          `tracking: ${isTracking}`
-        ]);
         if (now - lastFaceDiagLogTime > 1500) {
           lastFaceDiagLogTime = now;
           console.log('[TrackingDiag] Face loop heartbeat', {
@@ -1202,24 +1201,33 @@ function handlePinchControl(pinchData, handLandmarks) {
   if (initialIndexFingerY === -1) initialIndexFingerY = smoothedY;
   if (initialIndexFingerX === -1) initialIndexFingerX = smoothedX;
 
+  let rotationDelta = 0;
+  let positionDelta = 0;
   const deltaX = smoothedX - initialIndexFingerX;
   if (IS_MOBILE_DEVICE) {
     const rotationAmount = deltaX * 8;
+    rotationDelta = rotationAmount;
     targetRotationY = THREE.MathUtils.clamp(baselineRotationY + rotationAmount, -MAX_ROTATION, MAX_ROTATION);
 
     const deltaY = smoothedY - initialIndexFingerY;
     const positionAmount = -deltaY * 10;
+    positionDelta = positionAmount;
     targetPositionY = THREE.MathUtils.clamp(baselinePositionY + positionAmount, MIN_POSITION_Y, MAX_POSITION_Y);
   } else {
     const deltaY = smoothedY - initialIndexFingerY;
     const rotationAmount = deltaY * 8;
+    rotationDelta = rotationAmount;
     targetRotationY = THREE.MathUtils.clamp(baselineRotationY + rotationAmount, -MAX_ROTATION, MAX_ROTATION);
 
     const positionAmount = -deltaX * 10;
+    positionDelta = positionAmount;
     targetPositionX = THREE.MathUtils.clamp(baselinePositionX + positionAmount, -MAX_POSITION_X, MAX_POSITION_X);
   }
 
-  drawHandOverlay(handLandmarks, { pinchPoints: [[thumbX, thumbY], [indexX, indexY]] });
+  drawHandOverlay(handLandmarks, {
+    pinchPoints: [[thumbX, thumbY], [indexX, indexY]],
+    label: getPinchActionLabel(scaleRatio, rotationDelta, positionDelta)
+  });
   const scalePercent = ((targetScale / baselineScale) * 100).toFixed(0);
   const rotationDeg = (currentRotationY * 180 / Math.PI).toFixed(0);
   const positionX = currentPositionX.toFixed(1);
@@ -1228,6 +1236,15 @@ function handlePinchControl(pinchData, handLandmarks) {
   gestureIndicator.textContent = IS_MOBILE_DEVICE
     ? `Scale: ${scalePercent}% | Rot: ${rotationDeg} | Y: ${positionY}`
     : `Scale: ${scalePercent}% | Rot: ${rotationDeg} | Pos: ${positionX}`;
+}
+
+function getPinchActionLabel(scaleRatio, rotationDelta, positionDelta) {
+  const scalingActive = Math.abs(scaleRatio - 1) > 0.04;
+  const transformActive = Math.abs(rotationDelta) > 0.18 || Math.abs(positionDelta) > 0.18;
+  if (scalingActive && transformActive) return 'Scaling + Position+Rotation';
+  if (transformActive) return 'Position+Rotation';
+  if (scalingActive) return 'Scaling';
+  return 'Adjusting';
 }
 
 function drawHandOverlay(handLandmarks, options = {}) {
@@ -1271,6 +1288,38 @@ function drawHandOverlay(handLandmarks, options = {}) {
     overlayCtx.lineTo(pinchPoints[1][0], pinchPoints[1][1]);
     overlayCtx.stroke();
   }
+
+  if (options.label) {
+    drawHandActionLabel(points, options.label);
+  }
+}
+
+function drawHandActionLabel(points, label) {
+  const anchorPoint = points[8] || points[12] || points[0];
+  if (!anchorPoint || !label) return;
+
+  overlayCtx.font = '600 9px system-ui, sans-serif';
+  overlayCtx.textBaseline = 'middle';
+  const textWidth = overlayCtx.measureText(label).width;
+  const paddingX = 5;
+  const labelWidth = textWidth + paddingX * 2;
+  const labelHeight = 16;
+  const offsetX = 8;
+  const offsetY = -12;
+  const x = THREE.MathUtils.clamp(anchorPoint.x + offsetX, 4, overlayCanvas.width - labelWidth - 4);
+  const y = THREE.MathUtils.clamp(anchorPoint.y + offsetY, 4, overlayCanvas.height - labelHeight - 4);
+
+  overlayCtx.fillStyle = 'rgba(7, 10, 16, 0.82)';
+  overlayCtx.beginPath();
+  overlayCtx.roundRect(x, y, labelWidth, labelHeight, 8);
+  overlayCtx.fill();
+
+  overlayCtx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+  overlayCtx.lineWidth = 1;
+  overlayCtx.stroke();
+
+  overlayCtx.fillStyle = '#f4f8ff';
+  overlayCtx.fillText(label, x + paddingX, y + labelHeight / 2 + 0.5);
 }
 
 /* AVATAR UPDATE */

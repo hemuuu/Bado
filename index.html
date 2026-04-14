@@ -13,6 +13,17 @@
 }
 </script>
 
+<script>
+(() => {
+  const isNativePlatform = typeof window.Capacitor?.isNativePlatform === 'function'
+    ? window.Capacitor.isNativePlatform()
+    : false;
+  const isAndroidUserAgent = /Android/i.test(navigator.userAgent);
+  const isNativeAndroid = isNativePlatform && isAndroidUserAgent;
+  document.documentElement.dataset.platform = isNativeAndroid ? 'android-native' : 'web';
+})();
+</script>
+
 <style>
 html, body {
   margin: 0;
@@ -27,8 +38,14 @@ html, body {
   width: 108px;
   height: 144px;
   opacity: 1;
-  pointer-events: none;
   z-index: 4500;
+}
+
+html[data-platform="web"] #webcamContainer {
+  top: 16px;
+  right: 16px;
+  width: 204px;
+  height: 142px;
 }
 
 #webcamFrame {
@@ -38,11 +55,19 @@ html, body {
   flex-direction: column;
   overflow: hidden;
   border-radius: 14px;
-  background: #0f0f12;
+  background: transparent;
   border: 1px solid rgba(255, 255, 255, 0.35);
+  pointer-events: none;
   box-shadow:
     0 16px 30px rgba(0, 0, 0, 0.28),
     0 2px 0 rgba(255, 255, 255, 0.12) inset;
+}
+
+html[data-platform="web"] #webcamFrame {
+  border-radius: 18px;
+  box-shadow:
+    0 24px 44px rgba(0, 0, 0, 0.32),
+    0 2px 0 rgba(255, 255, 255, 0.16) inset;
 }
 
 #webcamChrome {
@@ -53,6 +78,20 @@ html, body {
   padding: 0 8px;
   background: linear-gradient(180deg, #fcfcfd 0%, #ececef 100%);
   border-bottom: 1px solid rgba(0, 0, 0, 0.14);
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+#webcamChrome.dragging {
+  cursor: grabbing;
+}
+
+html[data-platform="web"] #webcamChrome {
+  height: 22px;
+  gap: 6px;
+  padding: 0 10px;
 }
 
 .webcamDot {
@@ -62,6 +101,11 @@ html, body {
   opacity: 0.95;
 }
 
+html[data-platform="web"] .webcamDot {
+  width: 8px;
+  height: 8px;
+}
+
 .webcamDot.red { background: #ff5f57; }
 .webcamDot.yellow { background: #febc2e; }
 .webcamDot.green { background: #28c840; }
@@ -69,10 +113,15 @@ html, body {
 #webcamViewport {
   position: relative;
   flex: 1;
-  margin: 3px;
+  margin: 0;
   border-radius: 0 0 10px 10px;
   overflow: hidden;
   background: #17181c;
+  pointer-events: none;
+}
+
+html[data-platform="web"] #webcamViewport {
+  border-radius: 0 0 14px 14px;
 }
 
 #webcam {
@@ -81,6 +130,7 @@ html, body {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  pointer-events: none;
 }
 
 #overlayCanvas {
@@ -89,6 +139,7 @@ html, body {
   width: 100%;
   height: 100%;
   display: block;
+  pointer-events: none;
 }
 
 #gestureIndicator {
