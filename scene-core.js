@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { FilesetResolver, GestureRecognizer, FaceLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+import { FilesetResolver, GestureRecognizer, FaceLandmarker } from './vendor/mediapipe/tasks-vision/vision_bundle.mjs';
 import { createSceneRuntime } from './src/scene/create-scene-runtime.js';
 import { initWebcam } from './src/input/webcam.js';
 import {
@@ -9,6 +9,10 @@ import {
   getSmoothedPinchDistance
 } from './src/utils/pinch.js';
 import { ensurePushSubscription } from './src/notifications/push-client.js';
+import {
+  syncNativeWaterReminderSchedule,
+  showMissedWaterReminderNotification
+} from './src/notifications/native-water-reminders.js';
 import { loadWaterState, saveWaterState } from './src/backend/state-store.js';
 
 /* SCENE */
@@ -35,11 +39,17 @@ const WATER_MODE_SLOTS = [
   { hour: 17, minute: 0, label: '17:00' },
   { hour: 20, minute: 0, label: '20:00' }
 ];
+const SORTED_WATER_MODE_SLOTS = [...WATER_MODE_SLOTS].sort(
+  (a, b) => (a.hour * 60 + a.minute) - (b.hour * 60 + b.minute)
+);
 const WATER_MODE_DURATION_MS = 15 * 60 * 1000;
 const WATER_SCHEDULE_CHECK_MS = 15000;
 const WATER_STOP_HOLD_THRESHOLD = 4;
 const WATER_AUDIO_PATH = './water-drinking.mp3';
-const OPACITY_PENALTY_FACTOR = 0.93;
+const MEDIAPIPE_WASM_ROOT = './vendor/mediapipe/tasks-vision/wasm';
+const GESTURE_RECOGNIZER_MODEL_PATH = './vendor/mediapipe/models/gesture_recognizer.task';
+const FACE_LANDMARKER_MODEL_PATH = './vendor/mediapipe/models/face_landmarker.task';
+const OPACITY_PENALTY_FACTOR = 0.99;
 const OPACITY_REWARD_FACTOR = 1.10;
 const MIN_OPACITY_FACTOR = 0.2;
 const MAX_OPACITY_FACTOR = 1.0;
@@ -48,15 +58,19 @@ let waterModeEndsAt = 0;
 let waterModeTimeout = null;
 let waterScheduleTimer = null;
 let waterStopHoldFrames = 0;
-const consumedWaterSlots = new Set();
+const processedWaterSlots = new Set();
+let currentWaterSlotKey = null;
 let waterAudioContext = null;
 let waterAudioInterval = null;
 let waterLoopAudio = null;
 let waterTestControls = null;
 let modelOpacityFactor = 1.0;
 let gestureWaterExitStreak = 0;
+let lastWaterModeAt = 0;
+let lastWaterModeSlotKey = null;
 let notificationPermissionRequested = false;
 let pushSubscriptionReady = false;
+const WATER_LOOKBACK_DAYS = 3;
 
 const loader = new GLTFLoader();
 loadModel(DEFAULT_MODEL_PATH);
@@ -182,13 +196,31 @@ async function loadPersistentWaterState() {
     if (!state) return;
     const loadedOpacity = Number(state?.modelOpacityFactor);
     const loadedStreak = Number.parseInt(state?.gestureWaterExitStreak, 10);
+    const loadedEndsAt = Number(state?.waterModeEndsAt || 0);
+    const loadedProcessedSlots = Array.isArray(state?.processedSlotKeys) ? state.processedSlotKeys : [];
     if (Number.isFinite(loadedOpacity)) {
       modelOpacityFactor = THREE.MathUtils.clamp(loadedOpacity, MIN_OPACITY_FACTOR, MAX_OPACITY_FACTOR);
     }
     if (Number.isFinite(loadedStreak)) {
       gestureWaterExitStreak = THREE.MathUtils.clamp(loadedStreak, 0, 3);
     }
+    processedWaterSlots.clear();
+    loadedProcessedSlots.forEach((slotKey) => {
+      if (typeof slotKey === 'string' && slotKey.length > 0) processedWaterSlots.add(slotKey);
+    });
+    waterModeActive = Boolean(state?.waterModeActive);
+    waterModeEndsAt = Number.isFinite(loadedEndsAt) ? loadedEndsAt : 0;
+    currentWaterSlotKey = typeof state?.activeSlotKey === 'string' && state.activeSlotKey.length > 0
+      ? state.activeSlotKey
+      : null;
+    lastWaterModeAt = Number(state?.lastWaterModeAt || 0);
+    lastWaterModeSlotKey = typeof state?.lastWaterModeSlotKey === 'string' && state.lastWaterModeSlotKey.length > 0
+      ? state.lastWaterModeSlotKey
+      : null;
     applyModelOpacityFactor();
+    reconcileWaterModeState();
+    await processMissedWaterSlots();
+    logWaterModeSnapshot('loadPersistentWaterState');
   } catch (err) {
     console.warn('Persistent state unavailable, using in-memory defaults:', err);
   }
@@ -198,11 +230,170 @@ async function savePersistentWaterState() {
   try {
     await saveWaterState({
       modelOpacityFactor,
-      gestureWaterExitStreak
+      gestureWaterExitStreak,
+      waterModeActive,
+      waterModeEndsAt,
+      activeSlotKey: currentWaterSlotKey,
+      processedSlotKeys: Array.from(processedWaterSlots).sort(),
+      lastWaterModeAt,
+      lastWaterModeSlotKey
     });
   } catch (err) {
     console.warn('Failed to persist water state:', err);
   }
+}
+
+function reconcileWaterModeState(nowTs = Date.now()) {
+  if (waterModeActive && currentWaterSlotKey && waterModeEndsAt > nowTs) {
+    resumeActiveWaterMode();
+    return;
+  }
+
+  if (waterModeActive && currentWaterSlotKey) {
+    handleWaterModeStopEffects('timeout');
+    processedWaterSlots.add(currentWaterSlotKey);
+    lastWaterModeAt = nowTs;
+    lastWaterModeSlotKey = currentWaterSlotKey;
+    waterModeActive = false;
+    waterModeEndsAt = 0;
+    currentWaterSlotKey = null;
+    savePersistentWaterState();
+    logWaterModeSnapshot('reconcileWaterModeState');
+  }
+}
+
+function getWaterSlotOccurrencesBetween(startTs, endTs) {
+  if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || endTs <= startTs) return [];
+  const occurrences = [];
+  const startDate = new Date(startTs);
+  startDate.setHours(0, 0, 0, 0);
+  const endDate = new Date(endTs);
+  endDate.setHours(0, 0, 0, 0);
+
+  for (
+    const cursor = new Date(startDate);
+    cursor.getTime() <= endDate.getTime();
+    cursor.setDate(cursor.getDate() + 1)
+  ) {
+    SORTED_WATER_MODE_SLOTS.forEach((slot) => {
+      const slotStart = new Date(
+        cursor.getFullYear(),
+        cursor.getMonth(),
+        cursor.getDate(),
+        slot.hour,
+        slot.minute,
+        0,
+        0
+      );
+      const slotEnd = new Date(slotStart.getTime() + WATER_MODE_DURATION_MS);
+      if (slotEnd.getTime() <= startTs || slotEnd.getTime() > endTs) return;
+      occurrences.push({
+        slot,
+        slotStart,
+        slotEnd,
+        slotKey: getWaterSlotKey(slotStart, slot)
+      });
+    });
+  }
+
+  return occurrences.sort((a, b) => a.slotStart.getTime() - b.slotStart.getTime());
+}
+
+async function processMissedWaterSlots(nowTs = Date.now()) {
+  const lookbackStart = nowTs - WATER_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+  const occurrences = getWaterSlotOccurrencesBetween(lookbackStart, nowTs);
+  let missedCount = 0;
+
+  for (const occurrence of occurrences) {
+    if (processedWaterSlots.has(occurrence.slotKey)) continue;
+    if (waterModeActive && currentWaterSlotKey === occurrence.slotKey) continue;
+    handleWaterModeStopEffects('timeout');
+    processedWaterSlots.add(occurrence.slotKey);
+    lastWaterModeAt = occurrence.slotEnd.getTime();
+    lastWaterModeSlotKey = occurrence.slotKey;
+    missedCount += 1;
+  }
+
+  if (missedCount > 0) {
+    await savePersistentWaterState();
+    await showMissedWaterReminderNotification(missedCount, { title: 'Water Mode' });
+    logWaterModeSnapshot(`processMissedWaterSlots:${missedCount}`);
+  }
+
+  return missedCount;
+}
+
+function formatDateTime(value) {
+  if (!Number.isFinite(value) || value <= 0) return 'none';
+  return new Date(value).toLocaleString('en-IN', {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+}
+
+function parseWaterSlotKey(slotKey) {
+  if (!slotKey || typeof slotKey !== 'string') return null;
+  const [datePart, timePart] = slotKey.split('_');
+  if (!datePart || !timePart) return null;
+  const iso = `${datePart}T${timePart}:00`;
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+}
+
+function getNextUpcomingWaterMode(nowTs = Date.now()) {
+  for (let dayOffset = 0; dayOffset <= WATER_LOOKBACK_DAYS; dayOffset++) {
+    const base = new Date(nowTs);
+    base.setDate(base.getDate() + dayOffset);
+    for (const slot of SORTED_WATER_MODE_SLOTS) {
+      const slotStart = new Date(
+        base.getFullYear(),
+        base.getMonth(),
+        base.getDate(),
+        slot.hour,
+        slot.minute,
+        0,
+        0
+      );
+      const slotKey = getWaterSlotKey(slotStart, slot);
+      if (slotStart.getTime() <= nowTs) continue;
+      if (processedWaterSlots.has(slotKey) && dayOffset === 0) continue;
+      return { slotKey, at: slotStart.getTime() };
+    }
+  }
+  return null;
+}
+
+function logWaterModeSnapshot(reason) {
+  const nextSlot = getNextUpcomingWaterMode();
+  const parsedLastSlotDate = parseWaterSlotKey(lastWaterModeSlotKey);
+  const lastSlotTime = lastWaterModeAt || parsedLastSlotDate?.getTime() || 0;
+  console.info('[WaterMode]', {
+    reason,
+    currentOpacity: Number(modelOpacityFactor.toFixed(4)),
+    currentOpacityPercent: `${(modelOpacityFactor * 100).toFixed(2)}%`,
+    waterModeActive,
+    waterModeEndsAt: formatDateTime(waterModeEndsAt),
+    lastWaterModeSlotKey: lastWaterModeSlotKey || 'none',
+    lastWaterModeAt: formatDateTime(lastSlotTime),
+    nextWaterModeSlotKey: nextSlot?.slotKey || 'none',
+    nextWaterModeAt: formatDateTime(nextSlot?.at || 0),
+    processedWaterSlotCount: processedWaterSlots.size
+  });
+}
+
+function resumeActiveWaterMode() {
+  if (!waterModeActive || !currentWaterSlotKey || waterModeEndsAt <= Date.now()) return;
+  if (waterModeTimeout) clearTimeout(waterModeTimeout);
+  waterModeTimeout = setTimeout(() => stopWaterMode('timeout'), Math.max(0, waterModeEndsAt - Date.now()));
+  if (currentModelPath !== WATER_MODEL_PATH) loadModel(WATER_MODEL_PATH);
+  startWaterAudio();
+  gestureIndicator.classList.add('active');
+  gestureIndicator.textContent = 'Water Mode Active';
 }
 
 function createCloseButton() {
@@ -464,7 +655,7 @@ async function initMediaPipe() {
   if (mediaPipeInitializingPromise) return mediaPipeInitializingPromise;
   mediaPipeInitializingPromise = (async () => {
     const vision = await FilesetResolver.forVisionTasks(
-      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+      MEDIAPIPE_WASM_ROOT
     );
     console.log('[TrackingDiag] Initializing MediaPipe', {
       mobile: IS_MOBILE_DEVICE,
@@ -473,7 +664,7 @@ async function initMediaPipe() {
 
     gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
       baseOptions: {
-        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
+        modelAssetPath: GESTURE_RECOGNIZER_MODEL_PATH,
         delegate: MEDIAPIPE_DELEGATE
       },
       runningMode: 'VIDEO',
@@ -485,7 +676,7 @@ async function initMediaPipe() {
 
     faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
       baseOptions: {
-        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+        modelAssetPath: FACE_LANDMARKER_MODEL_PATH,
         delegate: MEDIAPIPE_DELEGATE
       },
       runningMode: 'VIDEO',
@@ -848,7 +1039,6 @@ function handleWaterModeStopEffects(source) {
     gestureWaterExitStreak = 0;
   }
   applyModelOpacityFactor();
-  savePersistentWaterState();
 }
 
 function ensureWaterTestControls() {
@@ -913,12 +1103,18 @@ function stopWaterAudio() {
 }
 
 function startWaterMode(slotKey = null, endsAt = null) {
+  if (waterModeActive && currentWaterSlotKey === slotKey) {
+    resumeActiveWaterMode();
+    return;
+  }
   if (waterModeActive) return;
   if (overlayActive) toggleOverlay();
   waterModeActive = true;
   waterModeEndsAt = endsAt || (Date.now() + WATER_MODE_DURATION_MS);
   waterStopHoldFrames = 0;
-  if (slotKey) consumedWaterSlots.add(slotKey);
+  currentWaterSlotKey = slotKey;
+  lastWaterModeAt = Date.now();
+  lastWaterModeSlotKey = slotKey;
   if (waterModeTimeout) clearTimeout(waterModeTimeout);
   waterModeTimeout = setTimeout(() => stopWaterMode('timeout'), Math.max(0, waterModeEndsAt - Date.now()));
   showWaterNotification();
@@ -926,14 +1122,19 @@ function startWaterMode(slotKey = null, endsAt = null) {
   if (currentModelPath !== WATER_MODEL_PATH) loadModel(WATER_MODEL_PATH);
   gestureIndicator.classList.add('active');
   gestureIndicator.textContent = 'Water Mode Active';
+  savePersistentWaterState();
+  logWaterModeSnapshot('startWaterMode');
 }
 
 function stopWaterMode(source = 'manual') {
   if (!waterModeActive) return;
+  const resolvedSlotKey = currentWaterSlotKey;
   waterModeActive = false;
   handleWaterModeStopEffects(source);
   waterStopHoldFrames = 0;
   waterModeEndsAt = 0;
+  currentWaterSlotKey = null;
+  if (resolvedSlotKey) processedWaterSlots.add(resolvedSlotKey);
   if (waterModeTimeout) {
     clearTimeout(waterModeTimeout);
     waterModeTimeout = null;
@@ -942,6 +1143,8 @@ function stopWaterMode(source = 'manual') {
   if (currentModelPath !== DEFAULT_MODEL_PATH) loadModel(DEFAULT_MODEL_PATH);
   gestureIndicator.classList.remove('active');
   gestureIndicator.textContent = source === 'timeout' ? 'Water mode completed' : 'Water mode stopped';
+  savePersistentWaterState();
+  logWaterModeSnapshot(`stopWaterMode:${source}`);
 }
 
 function getWaterSlotKey(date, slot) {
@@ -953,7 +1156,7 @@ function getWaterSlotKey(date, slot) {
 
 function checkScheduledWaterMode() {
   const now = new Date();
-  for (const slot of WATER_MODE_SLOTS) {
+  for (const slot of SORTED_WATER_MODE_SLOTS) {
     const slotStart = new Date(
       now.getFullYear(),
       now.getMonth(),
@@ -965,11 +1168,23 @@ function checkScheduledWaterMode() {
     );
     const slotEnd = new Date(slotStart.getTime() + WATER_MODE_DURATION_MS);
     const slotKey = getWaterSlotKey(now, slot);
-    if (now >= slotEnd) {
-      consumedWaterSlots.add(slotKey);
+    if (processedWaterSlots.has(slotKey)) {
       continue;
     }
-    if (now >= slotStart && now < slotEnd && !consumedWaterSlots.has(slotKey) && !waterModeActive) {
+    if (now >= slotEnd) {
+      if (waterModeActive && currentWaterSlotKey === slotKey) {
+        stopWaterMode('timeout');
+        return;
+      }
+      processedWaterSlots.add(slotKey);
+      handleWaterModeStopEffects('timeout');
+      lastWaterModeAt = slotEnd.getTime();
+      lastWaterModeSlotKey = slotKey;
+      savePersistentWaterState();
+      logWaterModeSnapshot(`checkScheduledWaterMode:missed:${slotKey}`);
+      continue;
+    }
+    if (now >= slotStart && now < slotEnd && !waterModeActive) {
       startWaterMode(slotKey, slotEnd.getTime());
       return;
     }
@@ -983,7 +1198,28 @@ function initWaterModeScheduler() {
 }
 
 function initNotificationPermissionHooks() {
-  return;
+  const reminderTemplate = {
+    title: 'Water Mode',
+    message: "hey i am drinking water, i'll be there for 15 minutes ."
+  };
+
+  syncNativeWaterReminderSchedule(WATER_MODE_SLOTS, reminderTemplate).catch((err) => {
+    console.warn('Native water reminder scheduling failed:', err);
+  });
+
+  ensurePushSubscription().then((isReady) => {
+    pushSubscriptionReady = Boolean(isReady);
+  }).catch((err) => {
+    console.warn('Push subscription setup failed:', err);
+  });
+
+  window.addEventListener('focus', () => {
+    loadPersistentWaterState();
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') loadPersistentWaterState();
+  });
 }
 
 /* DETECTION LOOP */

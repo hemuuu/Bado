@@ -45,7 +45,13 @@ export async function loadStateFromFirebase(firebaseConfig) {
   const data = snap.data();
   return {
     modelOpacityFactor: data.modelOpacityFactor,
-    gestureWaterExitStreak: data.gestureWaterExitStreak
+    gestureWaterExitStreak: data.gestureWaterExitStreak,
+    waterModeActive: Boolean(data.waterModeActive),
+    waterModeEndsAt: Number(data.waterModeEndsAt || 0),
+    activeSlotKey: data.activeSlotKey || null,
+    processedSlotKeys: Array.isArray(data.processedSlotKeys) ? data.processedSlotKeys : [],
+    lastWaterModeAt: Number(data.lastWaterModeAt || 0),
+    lastWaterModeSlotKey: data.lastWaterModeSlotKey || null
   };
 }
 
@@ -55,6 +61,12 @@ export async function saveStateToFirebase(firebaseConfig, state) {
   await setDoc(stateDocRef, {
     modelOpacityFactor: state.modelOpacityFactor,
     gestureWaterExitStreak: state.gestureWaterExitStreak,
+    waterModeActive: Boolean(state.waterModeActive),
+    waterModeEndsAt: Math.trunc(Number(state.waterModeEndsAt || 0)),
+    activeSlotKey: state.activeSlotKey || null,
+    processedSlotKeys: Array.isArray(state.processedSlotKeys) ? state.processedSlotKeys : [],
+    lastWaterModeAt: Math.trunc(Number(state.lastWaterModeAt || 0)),
+    lastWaterModeSlotKey: state.lastWaterModeSlotKey || null,
     updatedAt: serverTimestamp()
   }, { merge: true });
 }
@@ -67,9 +79,34 @@ function parseStateFromFirestoreDoc(docJson) {
   const streakRaw = fields.gestureWaterExitStreak?.integerValue
     ?? fields.gestureWaterExitStreak?.doubleValue
     ?? null;
+  const endsAtRaw = fields.waterModeEndsAt?.integerValue
+    ?? fields.waterModeEndsAt?.doubleValue
+    ?? null;
+  const activeSlotKey = fields.activeSlotKey?.stringValue ?? null;
+  const waterModeActive = Boolean(fields.waterModeActive?.booleanValue);
+  const lastWaterModeAtRaw = fields.lastWaterModeAt?.integerValue
+    ?? fields.lastWaterModeAt?.doubleValue
+    ?? null;
+  const lastWaterModeSlotKey = fields.lastWaterModeSlotKey?.stringValue ?? null;
+  const processedSlotKeys = Array.isArray(fields.processedSlotKeys?.arrayValue?.values)
+    ? fields.processedSlotKeys.arrayValue.values
+        .map((entry) => entry?.stringValue)
+        .filter((value) => typeof value === 'string' && value.length > 0)
+    : [];
   const modelOpacityFactor = opacityRaw != null ? Number(opacityRaw) : undefined;
   const gestureWaterExitStreak = streakRaw != null ? Number.parseInt(String(streakRaw), 10) : undefined;
-  return { modelOpacityFactor, gestureWaterExitStreak };
+  const waterModeEndsAt = endsAtRaw != null ? Number(endsAtRaw) : 0;
+  const lastWaterModeAt = lastWaterModeAtRaw != null ? Number(lastWaterModeAtRaw) : 0;
+  return {
+    modelOpacityFactor,
+    gestureWaterExitStreak,
+    waterModeActive,
+    waterModeEndsAt,
+    activeSlotKey,
+    processedSlotKeys,
+    lastWaterModeAt,
+    lastWaterModeSlotKey
+  };
 }
 
 export async function loadStateFromFirebaseRest(firebaseConfig) {
@@ -91,11 +128,22 @@ export async function saveStateToFirebaseRest(firebaseConfig, state) {
   const projectId = firebaseConfig?.projectId;
   const apiKey = firebaseConfig?.apiKey;
   if (!projectId || !apiKey) throw new Error('Missing projectId/apiKey for Firestore REST write');
-  const url = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/waterMode/state?key=${encodeURIComponent(apiKey)}&updateMask.fieldPaths=modelOpacityFactor&updateMask.fieldPaths=gestureWaterExitStreak`;
+  const url = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/waterMode/state?key=${encodeURIComponent(apiKey)}&updateMask.fieldPaths=modelOpacityFactor&updateMask.fieldPaths=gestureWaterExitStreak&updateMask.fieldPaths=waterModeActive&updateMask.fieldPaths=waterModeEndsAt&updateMask.fieldPaths=activeSlotKey&updateMask.fieldPaths=processedSlotKeys&updateMask.fieldPaths=lastWaterModeAt&updateMask.fieldPaths=lastWaterModeSlotKey`;
   const body = {
     fields: {
       modelOpacityFactor: { doubleValue: Number(state.modelOpacityFactor) },
-      gestureWaterExitStreak: { integerValue: String(Math.trunc(Number(state.gestureWaterExitStreak))) }
+      gestureWaterExitStreak: { integerValue: String(Math.trunc(Number(state.gestureWaterExitStreak))) },
+      waterModeActive: { booleanValue: Boolean(state.waterModeActive) },
+      waterModeEndsAt: { integerValue: String(Math.trunc(Number(state.waterModeEndsAt || 0))) },
+      activeSlotKey: { stringValue: state.activeSlotKey || '' },
+      lastWaterModeAt: { integerValue: String(Math.trunc(Number(state.lastWaterModeAt || 0))) },
+      lastWaterModeSlotKey: { stringValue: state.lastWaterModeSlotKey || '' },
+      processedSlotKeys: {
+        arrayValue: {
+          values: (Array.isArray(state.processedSlotKeys) ? state.processedSlotKeys : [])
+            .map((slotKey) => ({ stringValue: String(slotKey) }))
+        }
+      }
     }
   };
   const res = await fetch(url, {

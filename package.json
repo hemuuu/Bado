@@ -11,6 +11,8 @@
     "@capacitor/android": "^8.2.0",
     "@capacitor/cli": "^8.2.0",
     "@capacitor/core": "^8.2.0",
+    "@capacitor/local-notifications": "^8.0.2",
+    "@mediapipe/tasks-vision": "^0.10.13",
     "body-parser": "^2.2.2",
     "express": "^5.2.1",
     "web-push": "^3.6.7"

@@ -10,7 +10,6 @@ const files = [
   'scene-core.js',
   'tracking-mode.js',
   'edit-mode.js',
-  'faceauth.js',
   'mediapipe4.glb',
   'mediapipe4_water.glb',
   'water-drinking.mp3',
@@ -25,7 +24,8 @@ const files = [
 
 const dirs = [
   'src',
-  'enrollment_data'
+  'enrollment_data',
+  'vendor'
 ];
 
 function resetDir(dirPath) {
