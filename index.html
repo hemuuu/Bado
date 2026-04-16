@@ -33,19 +33,19 @@ html, body {
 }
 #webcamContainer {
   position: fixed;
-  top: 12px;
+  top: 20px; /* moved down from 12px to 20px */
   right: 12px;
-  width: 108px;
-  height: 144px;
+  width: 115.6px; /* 108px * 1.07 */
+  height: 154.1px; /* 144px * 1.07 */
   opacity: 1;
   z-index: 4500;
 }
 
 html[data-platform="web"] #webcamContainer {
-  top: 16px;
+  top: 26px; /* moved down from 16px to 26px */
   right: 16px;
-  width: 245px;
-  height: 170px;
+  width: 262.15px; /* 245px * 1.07 */
+  height: 181.9px; /* 170px * 1.07 */
 }
 
 #webcamFrame {

@@ -605,7 +605,11 @@ const MIN_POSITION_Y = -0.45;
 const MAX_POSITION_Y = 0.95;
 const IS_MOBILE_DEVICE = /Mobi|Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
   || (navigator.maxTouchPoints > 1 && window.matchMedia('(pointer: coarse)').matches);
-const MEDIAPIPE_DELEGATE = IS_MOBILE_DEVICE ? 'CPU' : 'GPU';
+let MEDIAPIPE_DELEGATE = 'GPU';
+if (IS_MOBILE_DEVICE) {
+  // Try GPU first, fallback to CPU if GPU fails
+  MEDIAPIPE_DELEGATE = 'GPU';
+}
 const MOBILE_DOUBLE_TAP_MS = 320;
 const MOBILE_ROTATION_DRAG_FACTOR = 0.012;
 const MOBILE_POSITION_DRAG_FACTOR = 0.01;
@@ -653,6 +657,7 @@ const TRACKING_Z_OFFSET = -1.35;
 async function initMediaPipe() {
   if (mediaPipeInitialized) return;
   if (mediaPipeInitializingPromise) return mediaPipeInitializingPromise;
+
   mediaPipeInitializingPromise = (async () => {
     const vision = await FilesetResolver.forVisionTasks(
       MEDIAPIPE_WASM_ROOT
@@ -662,37 +667,66 @@ async function initMediaPipe() {
       delegate: MEDIAPIPE_DELEGATE
     });
 
-    gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath: GESTURE_RECOGNIZER_MODEL_PATH,
-        delegate: MEDIAPIPE_DELEGATE
-      },
-      runningMode: 'VIDEO',
-      numHands: 1,
-      minHandDetectionConfidence: 0.3,
-      minHandPresenceConfidence: 0.3,
-      minTrackingConfidence: 0.3
-    });
+    try {
+      gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: GESTURE_RECOGNIZER_MODEL_PATH,
+          delegate: MEDIAPIPE_DELEGATE
+        },
+        runningMode: 'VIDEO',
+        numHands: 1,
+        minHandDetectionConfidence: 0.3,
+        minHandPresenceConfidence: 0.3,
+        minTrackingConfidence: 0.3
+      });
 
-    faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath: FACE_LANDMARKER_MODEL_PATH,
-        delegate: MEDIAPIPE_DELEGATE
-      },
-      runningMode: 'VIDEO',
-      numFaces: 1,
-      refineLandmarks: true,
-      minFaceDetectionConfidence: 0.5,
-      minFacePresenceConfidence: 0.5,
-      minTrackingConfidence: 0.5
-    });
-
+      faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: FACE_LANDMARKER_MODEL_PATH,
+          delegate: MEDIAPIPE_DELEGATE
+        },
+        runningMode: 'VIDEO',
+        numFaces: 1,
+        refineLandmarks: true,
+        minFaceDetectionConfidence: 0.5,
+        minFacePresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+    } catch (err) {
+      if (IS_MOBILE_DEVICE && MEDIAPIPE_DELEGATE === 'GPU') {
+        console.warn('[TrackingDiag] GPU delegate failed, retrying with CPU...', err);
+        MEDIAPIPE_DELEGATE = 'CPU';
+        gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: GESTURE_RECOGNIZER_MODEL_PATH,
+            delegate: MEDIAPIPE_DELEGATE
+          },
+          runningMode: 'VIDEO',
+          numHands: 1,
+          minHandDetectionConfidence: 0.3,
+          minHandPresenceConfidence: 0.3,
+          minTrackingConfidence: 0.3
+        });
+        faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: FACE_LANDMARKER_MODEL_PATH,
+            delegate: MEDIAPIPE_DELEGATE
+          },
+          runningMode: 'VIDEO',
+          numFaces: 1,
+          refineLandmarks: true,
+          minFaceDetectionConfidence: 0.5,
+          minFacePresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5
+        });
+      } else {
+        mediaPipeInitializingPromise = null;
+        throw err;
+      }
+    }
     console.log('MediaPipe initialized successfully');
     mediaPipeInitialized = true;
-  })().catch((err) => {
-    mediaPipeInitializingPromise = null;
-    throw err;
-  });
+  })();
 
   return mediaPipeInitializingPromise;
 }
@@ -784,6 +818,24 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Space') {
     e.preventDefault();
     toggleOverlay();
+  }
+
+  // Cheat code: Press '1' key 5 times to set opacity to 100% and save to Firebase
+  window.__cheatKeyPresses = window.__cheatKeyPresses || [];
+  const now = Date.now();
+  // Only keep presses within last 3 seconds
+  window.__cheatKeyPresses = window.__cheatKeyPresses.filter(ts => now - ts < 3000);
+  if (e.key === '1') {
+    window.__cheatKeyPresses.push(now);
+    if (window.__cheatKeyPresses.length >= 5) {
+      modelOpacityFactor = 1.0;
+      applyModelOpacityFactor();
+      savePersistentWaterState();
+      window.__cheatKeyPresses = [];
+      alert('Cheat activated: Opacity set to 100% and saved to Firebase!');
+    }
+  } else {
+    window.__cheatKeyPresses = [];
   }
 });
 
