@@ -31,9 +31,10 @@ html, body {
   overflow: hidden;
   background: #305CDE;
 }
+
 #webcamContainer {
   position: fixed;
-  top: 20px; /* moved down from 12px to 20px */
+  top: 60px; /* moved further down to avoid Android UI overlap */
   right: 12px;
   width: 115.6px; /* 108px * 1.07 */
   height: 154.1px; /* 144px * 1.07 */
@@ -42,10 +43,14 @@ html, body {
 }
 
 html[data-platform="web"] #webcamContainer {
-  top: 26px; /* moved down from 16px to 26px */
+  top: 60px; /* moved further down for web as well */
   right: 16px;
   width: 262.15px; /* 245px * 1.07 */
   height: 181.9px; /* 170px * 1.07 */
+}
+
+html[data-platform="android-native"] #webcamContainer {
+  top: 80px; /* even further down for native Android */
 }
 
 #webcamFrame {

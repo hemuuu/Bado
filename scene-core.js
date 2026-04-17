@@ -822,9 +822,11 @@ document.addEventListener('keydown', (e) => {
 
   // Cheat code: Press '1' key 5 times to set opacity to 100% and save to Firebase
   window.__cheatKeyPresses = window.__cheatKeyPresses || [];
+  window.__cheatWaterPresses = window.__cheatWaterPresses || [];
   const now = Date.now();
   // Only keep presses within last 3 seconds
   window.__cheatKeyPresses = window.__cheatKeyPresses.filter(ts => now - ts < 3000);
+  window.__cheatWaterPresses = window.__cheatWaterPresses.filter(ts => now - ts < 3000);
   if (e.key === '1') {
     window.__cheatKeyPresses.push(now);
     if (window.__cheatKeyPresses.length >= 5) {
@@ -834,8 +836,21 @@ document.addEventListener('keydown', (e) => {
       window.__cheatKeyPresses = [];
       alert('Cheat activated: Opacity set to 100% and saved to Firebase!');
     }
+    window.__cheatWaterPresses = [];
+  } else if (e.key === '2') {
+    window.__cheatWaterPresses.push(now);
+    if (window.__cheatWaterPresses.length >= 5) {
+      // Visually enable water mode for test only (does not affect logic/state)
+      if (model && currentModelPath !== WATER_MODEL_PATH) {
+        loadModel(WATER_MODEL_PATH);
+        alert('Cheat activated: Water mode visual enabled (test only)!');
+      }
+      window.__cheatWaterPresses = [];
+    }
+    window.__cheatKeyPresses = [];
   } else {
     window.__cheatKeyPresses = [];
+    window.__cheatWaterPresses = [];
   }
 });
 
